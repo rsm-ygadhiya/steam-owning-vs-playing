@@ -248,7 +248,10 @@ def run(log=print, quick=False):
 
     # ---- 3.2 latent factor model, grid over K x lambda
     tuning["mf"] = []
-    grid = [(8, 1e-4), (32, 1e-4)] if quick else [(k, l) for k in [8, 32, 64] for l in [1e-5, 1e-4, 1e-3]]
+    # The loss is MSE (~4) + lam * mean squared-norm of the touched rows, so lam <= 1e-3 is
+    # ~1/4000 of the loss and does nothing (valid MSE barely moved, MF overfit after epoch 2).
+    # Probing showed the useful range is ~0.03-0.2; lam >= 0.3 underfits.
+    grid = [(8, 0.1), (32, 0.1)] if quick else [(k, l) for k in [32, 64, 128] for l in [1e-3, 0.03, 0.1, 0.15, 0.2]]
     best = (np.inf, None, None)
     for k, lam in grid:
         m, hist = fit_mf(tr, va, nu, ni, k, lam, epochs=3 if quick else 12)

@@ -197,6 +197,12 @@ md(r"""
 ### 3.2 Latent factor model: `ŷ = α + β_u + β_i + γ_u·γ_i` (course week 4)
 Implemented in PyTorch with minibatch Adam. L2 is applied only to the rows touched by each batch (the usual SGD
 equivalent of the course objective). We grid-search K × λ on `valid` and keep the epoch with the best validation MSE.
+
+**Overfitting diagnosis and fix.** Our first grid used λ ≤ 1e-3. The penalty is `λ · mean ‖row‖²` next to an MSE of about 4, so it was
+roughly 1/4000 of the loss and changing λ barely moved validation MSE. MF memorized the training set: validation MSE was best at
+epoch 2 (4.24) and climbed to 6.1 by epoch 12 while train MSE fell to 1.2. We widened the grid to λ ∈ {1e-3, 0.03, 0.1, 0.15, 0.2}
+and K ∈ {32, 64, 128}. The best setting (K=128, λ=0.15) reaches valid MSE 4.138 and stays flat after its best epoch
+(epoch 12: 4.142), and λ ≥ 0.2 starts to underfit. The stacked models below are rebuilt on these better MF scores.
 """)
 code(r"""show_code("steam/regression_cf.py", "MF", "_train_torch")""")
 md(r"""
@@ -377,7 +383,7 @@ md(r"""
 **Limitations / next steps (V2):** a single split seed for the regression models (error bars only for the ranking factor
 models); the regression is limited to owned pairs; there is no temporal split (the crawl is a snapshot, so a sequential
 model would need review timestamps); the cold-start FM was not trained with id-dropout; the sampled ranking metrics favor popular items;
-MF is under-regularized (it overfits after 2 epochs, see training curves), and BPR and the hybrid weight are under-tuned.
+BPR and the hybrid weight are under-tuned.
 """)
 
 nb = nbf.v4.new_notebook()

@@ -134,7 +134,7 @@ def fig_training_curves():
         ax.set_title(name)
         ax.legend()
     axes[0].set_ylabel("MSE")
-    fig.suptitle("MF overfits after 2 epochs (regularization too weak); early stopping keeps the best epoch",
+    fig.suptitle("Stronger L2 (λ=0.15) keeps MF stable: valid MSE no longer blows up after the best epoch",
                  x=0.01, ha="left", fontsize=12.5, fontweight="bold")
     fig.tight_layout()
     save(fig, "F12_training_curves")
