@@ -20,7 +20,6 @@ import json
 import time
 
 import numpy as np
-import pandas as pd
 import scipy.sparse as sp
 from gensim.models import Word2Vec
 from implicit.als import AlternatingLeastSquares
@@ -149,10 +148,6 @@ def mapped_factor_scorer(U, V, X, warm_items, alpha=1.0):
     return factor_scorer(U, V_hat), V_hat
 
 
-def rank_normalize(S):
-    return S.argsort(1).argsort(1) / max(S.shape[1] - 1, 1)
-
-
 def zscore_rows(S):
     """Per-user standardization: keeps score gaps (rank-normalizing throws them away)."""
     S = np.asarray(S, np.float64)
@@ -187,13 +182,6 @@ def evaluate(scorer, R, ks=None):
     cands = np.concatenate([pos[:, None], negs], 1)
     S = scorer(users, cands)
     return metrics.ranking_report(S[:, 0], S[:, 1:], ks=ks)
-
-
-def topk_all(scorer_full, users, exclude, k=10):
-    """Top-k over the whole warm catalog, excluding games the user already owns."""
-    S = scorer_full(users)
-    S[exclude[users].nonzero()] = -np.inf
-    return np.argpartition(-S, k, 1)[:, :k]
 
 
 # ------------------------------------------------------------------ main

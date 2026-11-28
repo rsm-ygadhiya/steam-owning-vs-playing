@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from . import data, features
-from .viz import AQUA, BLUE, GREY, INK2, ORANGE, YELLOW, save
+from .viz import AQUA, BLUE, GREY, INK2, ORANGE, save
 
 
 def _inter():

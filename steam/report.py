@@ -11,11 +11,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.manifold import TSNE
-from sklearn.metrics import roc_curve
+from scipy import stats as sps
+from sklearn.metrics import roc_auc_score, roc_curve
 
 from .config import ART, SEED
 from . import features, splits
-from .viz import (AQUA, BLUE, GREY, INK, INK2, MAGENTA, ORANGE, SEQ, YELLOW, box_diagram, color,
+from .viz import (AQUA, BLUE, GREY, INK, INK2, ORANGE, box_diagram, color,
                   family_legend, hbar_models, save)
 
 RES = ART / "results"
@@ -293,6 +294,107 @@ def table_fit_gap():
         df.loc["MLP (neural net)"] = [f.train_mse.mean(), f.oof_mse.mean(), f.epochs.mean()]
     df["gap (oof − train)"] = df.oof_mse - df.train_mse
     return df.rename(columns={"rounds": "trees / epochs"})
+
+
+# ------------------------------------------------- simple statistics (Section 4.8)
+def table_auc_tests(n_boot=200):
+    """AUC on test with a 95% bootstrap CI, and p-values: vs chance (Mann-Whitney U) and vs the item-rate baseline."""
+    rows = []
+    rng = np.random.default_rng(SEED)
+    for target in ["played", "active"]:
+        P = pd.read_parquet(ART / f"cls_probs_{target}.parquet")
+        y = P.pop("y").values.astype(int)
+        idx = [rng.integers(0, len(y), len(y)) for _ in range(n_boot)]
+        base = P["Item rate (baseline)"].values
+        base_b = np.array([roc_auc_score(y[i], base[i]) for i in idx])
+        for name in P.columns:
+            p = P[name].values
+            auc = roc_auc_score(y, p)
+            b = np.array([roc_auc_score(y[i], p[i]) for i in idx])
+            d = b - base_b
+            p_vs_base = (2 * min((d <= 0).mean(), (d >= 0).mean())) if name != "Item rate (baseline)" else np.nan
+            rows.append({"target": target, "model": name, "AUC": auc,
+                         "95% CI": f"[{np.quantile(b, .025):.3f}, {np.quantile(b, .975):.3f}]",
+                         "p vs chance (AUC=0.5)": sps.mannwhitneyu(p[y == 1], p[y == 0], alternative="greater").pvalue,
+                         "p vs item-rate baseline": max(p_vs_base, 1 / n_boot) if not np.isnan(p_vs_base) else np.nan})
+    return pd.DataFrame(rows).set_index(["target", "model"])
+
+
+def table_regression_tests():
+    """Test-set R², correlation of predictions with truth, and paired t-test p-values vs the course bias model."""
+    te = splits.load("test")
+    P = pd.read_parquet(ART / "reg_preds_test.parquet")
+    y = te.y.values
+    e_bias = (P["Bias model"].values - y) ** 2
+    rows = []
+    for name in P.columns:
+        p = P[name].values
+        e = (p - y) ** 2
+        rows.append({"model": name, "MSE": e.mean(), "R²": 1 - e.mean() / y.var(),
+                     "Pearson r (pred, actual)": np.corrcoef(p, y)[0, 1] if p.std() > 0 else np.nan,
+                     "p vs bias model (paired t)": sps.ttest_rel(e, e_bias).pvalue if name != "Bias model" else np.nan})
+    return pd.DataFrame(rows).set_index("model")
+
+
+INTERPRETABLE = {"meta_price": "price ($)", "meta_free": "free to play", "meta_metascore": "metascore",
+                 "meta_sentiment": "store sentiment (0-8)", "meta_multiplayer": "multiplayer",
+                 "meta_early_access": "early access", "meta_release_year": "release year",
+                 "user_library_size": "user's library size", "user_played_rate": "user's play rate (train)",
+                 "ug_mean_y": "user's hours in this genre (train)", "meta_dev_mean_y": "developer's typical hours (train)",
+                 "uc_knn_y": "user's hours on similar games (train)"}
+
+
+def _features_for(name):
+    d = splits.load(name)
+    X = pd.concat([features.pair_features(d), features.extra_features(name, d)], axis=1)
+    return X[list(INTERPRETABLE)].rename(columns=INTERPRETABLE), d.y.values
+
+
+def table_correlations():
+    """Spearman correlation of each interpretable variable with log playtime (test pairs)."""
+    X, y = _features_for("test")
+    rows = []
+    for c in X.columns:
+        ok = X[c].notna().values
+        r, p = sps.spearmanr(X[c].values[ok], y[ok])
+        rows.append({"variable": c, "Spearman ρ with log-hours": r, "p-value": p, "pairs": int(ok.sum())})
+    return pd.DataFrame(rows).set_index("variable").sort_values("Spearman ρ with log-hours", key=np.abs, ascending=False)
+
+
+def table_ols():
+    """Interpretable linear regression (course week 1-2): standardized coefficients with SEs and p-values.
+    Fit on VALID, R² reported on TEST. Missing values -> median + indicator (indicators not shown)."""
+    out = {}
+    for name in ["valid", "test"]:
+        X, y = _features_for(name)
+        out[name] = (X, y)
+    Xv, yv = out["valid"]
+    med, mu, sd = Xv.median(), None, None
+    Mv0 = Xv.isna().astype(float).add_suffix(" (missing)")
+    Mv0 = Mv0.loc[:, Mv0.any().values]
+    keep_miss = Mv0.T.drop_duplicates().index      # e.g. no store page -> all metadata missing together
+    def design(X):
+        miss = X.isna().astype(float).add_suffix(" (missing)")
+        miss = miss.loc[:, keep_miss]          # one indicator per distinct missingness pattern
+        Z = X.fillna(med)
+        return Z, miss
+    Zv, Mv = design(Xv)
+    mu, sd = Zv.mean(), Zv.std()
+    def mat(X):
+        Z, M = design(X)
+        return np.column_stack([np.ones(len(Z)), ((Z - mu) / sd).values, M.values])
+    A, Bt = mat(Xv), mat(out["test"][0])
+    beta, *_ = np.linalg.lstsq(A, yv, rcond=None)
+    resid = yv - A @ beta
+    dof = len(yv) - A.shape[1]
+    s2 = resid @ resid / dof
+    se = np.sqrt(np.diag(s2 * np.linalg.inv(A.T @ A)))
+    t = beta / se
+    k = 1 + Zv.shape[1]
+    df = pd.DataFrame({"coef (per 1 SD)": beta[1:k], "std. error": se[1:k], "t": t[1:k],
+                       "p-value": 2 * sps.t.sf(np.abs(t[1:k]), dof)}, index=Zv.columns)
+    r2_test = 1 - np.mean((out["test"][1] - Bt @ beta) ** 2) / out["test"][1].var()
+    return df.sort_values("coef (per 1 SD)", key=np.abs, ascending=False), float(r2_test)
 
 
 def fig_mse_bars(split="test"):

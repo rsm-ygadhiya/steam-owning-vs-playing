@@ -109,7 +109,7 @@ def run(log=print):
     S_ltr = bst.predict(safe(Xt), num_iteration=bst.best_iteration).reshape(n_t, c_t)
     base_scores = {str(nm): Z["test"]["F"][:, :, k] for k, nm in enumerate(Z["test"]["names"])}
     paired = {nm: paired_bootstrap(user_ndcg(S_ltr), user_ndcg(S)) for nm, S in base_scores.items()}
-    log(f"[5.5] paired bootstrap (LTR minus base, NDCG@10): "
+    log("[5.5] paired bootstrap (LTR minus base, NDCG@10): "
         + ", ".join(f"{k}: {v['diff']:+.4f} [{v['lo']:+.4f}, {v['hi']:+.4f}]" for k, v in paired.items()))
 
     # ---- 5.6 the Task 4 played-classifier on the hard protocol (all candidates are test pairs)

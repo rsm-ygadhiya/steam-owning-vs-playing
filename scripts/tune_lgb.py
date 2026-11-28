@@ -7,8 +7,8 @@ Chosen setting is written into steam/regression_stack.py (LGB_REG). Test data is
 import json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import pandas as pd, numpy as np
-from steam import splits, features, metrics
+import pandas as pd
+from steam import splits, features
 from steam.regression_stack import crossfit_lgb, LGB_REG, FIT_GAP
 rows = []
 va = splits.load("valid"); base = pd.read_parquet("artifacts/reg_base_valid.parquet")

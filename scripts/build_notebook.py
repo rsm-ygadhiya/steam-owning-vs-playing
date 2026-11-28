@@ -464,6 +464,45 @@ display(Markdown("**This user's most-played games**")); display(lib)
 display(Markdown("**Top-5 recommendations (playtime-weighted ALS), with an explanation**")); display(recs)
 """)
 
+md(r"""
+## 4.8 Simple statistics: significance, correlation, and what we can (not) claim
+**Classification.** AUC with a 95% bootstrap interval (200 resamples of test pairs), a Mann-Whitney test against chance
+(AUC = 0.5), and a paired bootstrap test against the item-rate baseline (p-values at the bootstrap floor of 1/200 mean
+"smaller than 0.005").
+""")
+code(r"""report.table_auc_tests().style.format({"AUC": "{:.4f}", "p vs chance (AUC=0.5)": "{:.1e}", "p vs item-rate baseline": "{:.3f}"}, na_rep="–")""")
+md(r"""
+**Regression.** R² (share of variance in log-hours explained), the correlation between predictions and actual values,
+and a paired t-test on squared errors against the course bias model.
+""")
+code(r"""report.table_regression_tests().style.format("{:.4f}", na_rep="–").format({"p vs bias model (paired t)": "{:.1e}"}, na_rep="–")""")
+md(r"""
+**Which variables move with playtime?** Spearman correlation of each interpretable variable with log-hours on test pairs,
+then a linear regression (course weeks 1–2) on standardized variables, fit on `valid` and scored on `test`.
+""")
+code(r"""
+display(report.table_correlations().style.format({"Spearman ρ with log-hours": "{:+.3f}", "p-value": "{:.1e}", "pairs": "{:,}"}))
+ols, r2 = report.table_ols()
+display(ols.style.format({"coef (per 1 SD)": "{:+.3f}", "std. error": "{:.4f}", "t": "{:.1f}", "p-value": "{:.1e}"}))
+display(Markdown(f"Linear model on these 12 variables: **test R² = {r2:.3f}**, vs **{report.table_regression_tests().loc['Ensemble','R²']:.3f}** for the ensemble."))
+""")
+md(r"""
+**How to read these numbers.**
+- **Everything is "significant", so look at effect sizes.** With ~500k test pairs, even tiny effects get p < 0.001. The
+  question is how *large* an effect is, not whether p is small. Also, pairs from the same user are not independent, so
+  these classical p-values are, if anything, too small; the bootstrap intervals are the more honest uncertainty measure.
+- **Correlation.** The strongest single correlate of playtime is the user's own history on *similar* games (ρ ≈ 0.49),
+  then genre affinity and the user's general play rate. Game quality signals (store sentiment, metascore) and price matter
+  less, and larger libraries mean *less* time per game (ρ < 0). A 12-variable linear model explains about a quarter of the
+  variance; the full nonlinear ensemble explains far more, so interactions and collaborative signal carry most of the information.
+- **Causation: we do not claim any.** This is observational data with no intervention. Coefficients describe association
+  *conditional on the other variables*, and they change with that set: "user's hours in this genre" is positive on its own
+  but negative once "hours on similar games" is included, because the two overlap. Price looks positive, but price is
+  confounded with game type, sales and bundles (cheap games are often bundle filler). Proving that, say, lowering a price *causes*
+  more play would need an experiment (A/B test) or a natural experiment such as a discount event. Our models are built for
+  **prediction**, which is what a recommender needs, not for estimating causal effects.
+""")
+
 # =============================================================================
 md(r"""
 # 5. Related work

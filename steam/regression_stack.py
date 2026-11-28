@@ -74,7 +74,7 @@ def crossfit_catboost(X_va, y_va, X_others, folds=5, name="CatBoost"):
     for a, b in KFold(folds, shuffle=True, random_state=SEED).split(X_va):
         fit, es = _es_split(a)
         m = CatBoostRegressor(iterations=3000, learning_rate=0.08, depth=8, l2_leaf_reg=3, loss_function="RMSE",
-                              random_seed=SEED, thread_count=8, verbose=0, od_type="Iter", od_wait=100)
+                              random_seed=SEED, thread_count=8, verbose=0, allow_writing_files=False, od_type="Iter", od_wait=100)
         m.fit(X_va.iloc[fit], y_va[fit], eval_set=(X_va.iloc[es], y_va[es]), use_best_model=True)
         oof[b] = m.predict(X_va.iloc[b])
         for o, X in zip(others, X_others):

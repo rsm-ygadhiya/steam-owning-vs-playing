@@ -4,3 +4,4 @@ __pycache__/
 artifacts/
 data/*.gz
 .DS_Store
+catboost_info/
