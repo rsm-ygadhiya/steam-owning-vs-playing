@@ -127,8 +127,8 @@ def fig_ladder():
     fig, ax = plt.subplots(figsize=(12.5, 2.6))
     steps = [("Means", GREY), ("Bias\nα+β_u+β_i", BLUE), ("Latent factors\n+ γ_u·γ_i", BLUE),
              ("Factorization\nmachine\n+ metadata", ORANGE), ("LightGBM\nstacked", ORANGE),
-             ("Hurdle\nP×E", ORANGE), ("Ensemble", ORANGE)]
-    w, gap = 12, 2.2
+             ("Hurdle\nP×E", ORANGE), ("CatBoost\n+ MLP", ORANGE), ("Non-neg.\nensemble", ORANGE)]
+    w, gap = 10.6, 1.9
     boxes, arrows = [], []
     for k, (t, c) in enumerate(steps):
         x = 1 + k * (w + gap)
@@ -215,7 +215,7 @@ def fig_importance(k=15):
     imp = pd.read_json(RES / "lgb_importance.json", typ="series")
     imp = (imp / imp.sum()).head(k)
     fig, ax = plt.subplots(figsize=(8, 5))
-    cols = [ORANGE if c.endswith(("pred", "dot")) else BLUE for c in imp.index]
+    cols = [ORANGE if c.endswith(("pred", "dot", "i2v_sim")) else BLUE for c in imp.index]
     ax.barh(imp.index[::-1], imp.values[::-1], color=cols[::-1], height=0.68)
     ax.set_xlabel("Share of total gain")
     ax.grid(axis="y", visible=False)
@@ -227,6 +227,74 @@ def fig_importance(k=15):
 
 
 # -------------------------------------------------------------- evaluation
+def fig_calibration(model="Ensemble", n_bins=20):
+    """F26: are the predictions trustworthy? Regression and classifier calibration on TEST."""
+    te = splits.load("test")
+    p = pd.read_parquet(ART / "reg_preds_test.parquet")[model].values
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.4))
+    ax = axes[0]
+    q = pd.qcut(p, n_bins, labels=False, duplicates="drop")
+    g = pd.DataFrame({"p": p, "y": te.y.values, "q": q}).groupby("q")
+    lo, hi = g.y.quantile(0.25), g.y.quantile(0.75)
+    ax.fill_between(g.p.mean(), lo, hi, color=BLUE, alpha=0.15, label="actual: middle 50%")
+    ax.plot(g.p.mean(), g.y.mean(), "o-", color=BLUE, ms=4, label="actual: mean")
+    ax.plot([0, 9], [0, 9], ls="--", color=GREY, lw=1, label="perfect calibration")
+    ax.set_xlabel(f"Predicted log(1 + minutes)  ({model}, {n_bins} bins)")
+    ax.set_ylabel("Actual log(1 + minutes)")
+    ax.legend(loc="upper left", fontsize=8.5)
+    ax.set_title("Regression: unbiased in every bin, but wide spread per pair", fontsize=11)
+    ax = axes[1]
+    C = pd.read_parquet(ART / "cls_probs_played.parquet")
+    for name, c in [("Logistic (features)", BLUE), ("LightGBM (stacked)", ORANGE)]:
+        q = pd.qcut(C[name], 10, labels=False, duplicates="drop")
+        g = C.groupby(q)
+        ax.plot(g[name].mean(), g.y.mean(), "o-", color=c, ms=4, label=name)
+    ax.plot([0, 1], [0, 1], ls="--", color=GREY, lw=1)
+    ax.set_xlabel("Predicted P(played)  (deciles)")
+    ax.set_ylabel("Observed share played")
+    ax.legend(loc="upper left", fontsize=8.5)
+    ax.set_title("Classifier: predicted probabilities match observed rates", fontsize=11)
+    fig.suptitle("Validity check: predictions are calibrated on held-out test data",
+                 x=0.01, ha="left", fontsize=12.5, fontweight="bold")
+    fig.tight_layout()
+    save(fig, "F26_calibration")
+    return fig
+
+
+def calibration_stats(model="Ensemble"):
+    """Rank agreement overall and within each user's own library (test)."""
+    te = splits.load("test")
+    p = pd.read_parquet(ART / "reg_preds_test.parquet")[model].values
+    d = pd.DataFrame({"u": te.u.values, "p": p, "y": te.y.values})
+    big = d[d.groupby("u").u.transform("size") >= 5]
+    r = big.groupby("u")[["p", "y"]].rank()
+    r["u"] = big.u.values
+    within = r.groupby("u").apply(lambda x: x.p.corr(x.y)).dropna()
+    rmse = float(np.sqrt(np.mean((p - te.y.values) ** 2)))
+    return pd.Series({"RMSE (log scale)": rmse, "typical error factor e^RMSE": float(np.exp(rmse)),
+                      "Spearman, all test pairs": d.p.corr(d.y, method="spearman"),
+                      "median within-user Spearman (≥5 test games)": within.median(),
+                      "users in within-user check": len(within)}).to_frame("value")
+
+
+def table_lgb_tuning():
+    df = pd.DataFrame(load("lgb_tuning"))
+    df["gap"] = df.oof_mse - df.train_mse
+    return df.set_index(["model", "setting"])[["learning_rate", "num_leaves", "min_data_in_leaf", "lambda_l2",
+                                               "feature_fraction", "trees", "train_mse", "oof_mse", "gap"]]
+
+
+def table_fit_gap():
+    """Train vs out-of-fold MSE for every cross-fit learner: a small gap means no overfitting."""
+    g = load("regression")["tuning"].get("fit_gap", {})
+    df = pd.DataFrame(g).T
+    if (RES / "regression_nn.json").exists():
+        f = pd.DataFrame(load("regression_nn")["folds"])
+        df.loc["MLP (neural net)"] = [f.train_mse.mean(), f.oof_mse.mean(), f.epochs.mean()]
+    df["gap (oof − train)"] = df.oof_mse - df.train_mse
+    return df.rename(columns={"rounds": "trees / epochs"})
+
+
 def fig_mse_bars(split="test"):
     """F16: MSE by model."""
     df = table_regression(split).sort_values("MSE", ascending=False)

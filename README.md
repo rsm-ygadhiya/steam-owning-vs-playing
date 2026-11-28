@@ -26,10 +26,11 @@ Rerun one stage after changing it: `uv run python scripts/run_all.py ranking` (s
 |---|---|---|---|---|
 | `data` | `steam/data.py` | 1 | parse + clean the 4 raw files | `artifacts/*.parquet` |
 | `splits` | `steam/splits.py` | 1 | **the one shared split** + ranking protocols + leakage checks | `train/valid/test/cold.parquet`, `rank_*.npz` |
-| – | `steam/features.py` | 1/3 | leak-free features (train-only stats, genre affinity, metadata) | – |
+| – | `steam/features.py` | 1/3 | leak-free features: train-only stats, genre/tag/developer affinity, sentiment, bundles, reviews, leave-game-out developer encoding, item-kNN (content + item2vec); `stack_features` | `feat_extra_*.parquet` (cache) |
 | `regression_cf` | `steam/regression_cf.py` | 3 | **PyTorch**: means, bias model, MF, factorization machine | `reg_base_*.parquet` |
 | `ranking` | `steam/ranking.py` | 5 | popularity, Jaccard, BPR, ALS (binary vs playtime), item2vec, content, z-score hybrid, cold start; dumps candidate scores | `results/ranking.json`, `rank_feats_*.npz` |
-| `regression_stack` | `steam/regression_stack.py` | 3 | **LightGBM**: stacked model (+ ALS / item2vec affinities), metadata-only model, hurdle, ensemble | `results/regression.json` |
+| `regression_nn` | `steam/regression_nn.py` | 3 | **PyTorch MLP** on the stacked features (same 5 folds) | `reg_nn_*.parquet` |
+| `regression_stack` | `steam/regression_stack.py` | 3 | **LightGBM + CatBoost**: stacked models, metadata-only model, hurdle, non-negative ensemble, fit gaps | `results/regression.json` |
 | `classify` | `steam/classify.py` | 4 | played / active classifiers (logistic, LightGBM) | `results/classification.json` |
 | `ranking_ltr` | `steam/ranking_ltr.py` | 5 | **LightGBM LambdaRank** reranker over all recommenders; Task 4 classifier on the hard protocol; paired bootstrap | `results/ranking_ltr.json` |
 | – | `steam/metrics.py` | 6 | every metric (MSE, AUC/BER, HR/NDCG, coverage/novelty) | – |
@@ -55,6 +56,18 @@ Rerun one stage after changing it: `uv run python scripts/run_all.py ranking` (s
 - **Task 4 classifier ranks the hard protocol**: AUC ≈ 0.86 vs 0.76 for the best recommender.
 - **Significance**: paired bootstrap CIs for the regression ladder and the reranker's gains.
 - Stage order changed: `ranking` now runs before `regression_stack` (its factors are features).
+
+## V3 changes (done)
+
+- **New variables**: store sentiment, bundles, developer/publisher (leave-game-out target encoding), reviews (train pairs only),
+  library composition; **interactions**: price vs user's usual price, user × tag, user × developer, item-kNN regression (content + item2vec).
+- **New nonlinear learners**: CatBoost and a PyTorch MLP; ensemble is now a **non-negative** blend.
+- **Rookie-mistake fixes**: early stopping now uses a slice of the *training* fold (V1/V2 early-stopped on the scored fold);
+  developer encoding excludes the game itself (train/serve skew for cold start).
+- **Overfitting controls**: train vs OOF gap logged for every learner; LightGBM regularization chosen on valid (`scripts/tune_lgb.py`).
+- **Validity**: calibration plot + within-user rank correlation (F26).
+- Results: ensemble test MSE 3.914 → ~3.85; cold-start (routed metadata model) 8.63 → ~7.4; played AUC → ~0.90.
+- If you change `features.py`, bump `EXTRA_VERSION` (feature cache) and rerun from `regression_nn`.
 
 ## Remaining ideas
 

@@ -29,7 +29,8 @@ from sklearn.preprocessing import StandardScaler
 
 from .config import ART, SEED
 from . import features, metrics, splits
-from .regression_stack import LGB_CLF, crossfit_lgb, stack_features
+from .features import stack_features
+from .regression_stack import LGB_CLF, crossfit_lgb
 
 RES = ART / "results"
 
@@ -52,7 +53,7 @@ def run(log=print):
     va, te = splits.load("valid"), splits.load("test")
     base = {n: pd.read_parquet(ART / f"reg_base_{n}.parquet") for n in ["valid", "test"]}
     Xva, Xte = stack_features("valid", va, base["valid"]), stack_features("test", te, base["test"])
-    meta_cols = [c for c in Xva.columns if c.startswith(("user_", "meta_", "ug_"))]
+    meta_cols = [c for c in Xva.columns if c.startswith(features.META_PREFIXES)]
     _, istats, _, _ = features.train_stats()
     ustats = features.train_stats()[0]
 

@@ -98,6 +98,9 @@ md(r"""
 2. Explicit leakage rules (below), verified by automated checks.
 3. Every model is compared against trivial baselines, and every component is ablated (Section 4).
 4. Separate **cold-start** evaluation on games never seen in training.
+5. **Calibration and rank agreement** of the final predictions on test (Section 4.1): are they unbiased, and do they order
+   a user's own games correctly?
+6. **Overfitting checks**: train vs out-of-fold error for every stacked learner, and paired bootstrap intervals for every claimed gain.
 """)
 md(r"""
 ### The shared split (and why it is leak-free)
@@ -234,7 +237,44 @@ The **hurdle model** splits the problem in two. Since y = 0 whenever a game is u
 `E[y] = P(played) · E[y | played]` is the MSE-optimal prediction. Stage 1 is exactly the Task 4 classifier.
 """)
 code(r"""report.fig_hurdle(); plt.show()""")
-code(r"""show_code("steam/regression_stack.py", "crossfit_lgb", "run")""")
+md(r"""
+#### Extra variables and explicit interactions
+Our first version ignored several fields. All are now used, each with a leakage rule:
+
+| Feature group | Columns | Leakage rule |
+|---|---|---|
+| Store **sentiment** (ordinal 0–8), few-review flag | `meta_sentiment`, `meta_few_store_reviews` | store metadata, no playtime |
+| **Bundles**: number of bundles, max discount | `meta_n_bundles`, `meta_bundle_discount` | store metadata |
+| **Developer / publisher** target encoding (mean log-hours, play rate, catalog size) | `meta_dev_*`, `meta_pub_*` | train playtime only, **leave-game-out**: a game's own hours are removed from its developer's average, otherwise a one-game developer's encoding *is* the game's mean, and the cold-start model would learn a signal it can never have for unseen games |
+| **Reviews**: user's review count / recommend rate, game's review count / recommend rate | `user_n_reviews`, `item_n_reviews`, … | only reviews on **train** pairs (a review on a held-out pair would reveal that it was played) |
+| Library composition: share of free games, mean price, share with metadata | `user_free_share`, `user_mean_price`, … | ownership is a legal input |
+| **Interactions** | | |
+| price relative to what this user usually owns | `x_price_vs_user` | |
+| user × tag affinity (mean log-hours on games sharing the game's tags) | `ut_mean_y` | train playtime only |
+| user × developer loyalty (hours on the developer's other games) | `udev_mean_y`, `udev_n` | train playtime only |
+| **item-kNN regression**: similarity-weighted hours on the user's 20 most similar owned games, by **content** (works for unseen games) and by **item2vec** (warm only) | `uc_knn_*`, `cf_knn_*` | train playtime only; item2vec fit on train |
+
+The cold-start model may only use columns with no game-identity signal (`user_`, `meta_`, `ug_`, `ut_`, `udev_`, `uc_`, `x_` prefixes).
+""")
+code(r"""show_code("steam/features.py", "item_extra", "_knn")""")
+code(r"""show_code("steam/regression_stack.py", "_es_split", "crossfit_lgb", "run")""")
+md(r"""
+#### 3.7 Other nonlinear learners: CatBoost and a neural network
+- **CatBoost** (ordered boosting on symmetric trees) is a different tree learner from LightGBM (leaf-wise trees): it is
+  more resistant to overfitting on target-like features and its errors are only partly correlated with LightGBM's.
+- **MLP (PyTorch)**, 3 hidden layers (256-128-64, ReLU, dropout), on the same stacked features after log-compression,
+  median imputation with missing-value indicators, and standardization (all fit on the training fold only). A neural
+  network learns smooth interactions among all features at once rather than axis-aligned splits.
+- All learners use the **same 5 folds** on `valid`, so their out-of-fold predictions can be blended without leakage.
+  The final **ensemble** is a **non-negative** least-squares blend of the out-of-fold predictions (no offsetting
+  positive/negative weights that only fit noise).
+
+**Early stopping without leakage.** Our first version early-stopped LightGBM on the very fold it then scored, so the
+out-of-fold rows chose the number of trees (a mild optimistic bias). Every learner now early-stops on a 10% slice carved
+out of its *training* fold.
+""")
+code(r"""show_code("steam/regression_stack.py", "crossfit_catboost")""")
+code(r"""show_code("steam/regression_nn.py", "MLP", "fit_mlp")""")
 md(r"""
 ### 3.6 Recommendation models (Task 5)
 - **Most-popular / Jaccard item-kNN**: course baselines; Jaccard over sets of players, summed over the user's games.
@@ -269,6 +309,8 @@ md(r"""
 | Factorization machine | adds metadata, handles cold start, generalizes MF | more hyperparameters; sparse-feature engineering | ~2 min per config |
 | LightGBM stack | strongest tabular learner, feature importance | needs careful out-of-fold protocol to avoid leakage | ~1 min |
 | Hurdle | matches the zero-inflated target; reuses the Task 4 classifier | two models to maintain | ~2 min |
+| CatBoost | robust to overfitting, different inductive bias from LightGBM | slower to train | ~5 min |
+| MLP | smooth feature interactions; complements trees in a blend | needs scaling/imputation; less interpretable | ~3 min |
 | ALS (implicit) | fast, uses playtime as confidence | squared loss on 0/1 targets; popularity-leaning | ~10 s per config |
 | BPR | optimizes ranking directly | slow to converge; sensitive to learning rate | ~1 min |
 | Content / mapped factors | only option for unseen games | weaker on warm games | seconds |
@@ -294,6 +336,17 @@ display(Markdown(f"**Best: {b}**, test MSE **{reg.loc[b,'MSE']:.3f}** vs **{reg.
 """)
 code(r"""report.fig_mse_bars("test"); plt.show()""")
 md(r"""
+**Overfitting check.** For every cross-fit learner: mean in-fold training MSE vs out-of-fold MSE, and the number of
+trees/epochs chosen by early stopping. A small gap means the learner generalizes; a large one means it memorized.
+""")
+code(r"""report.table_fit_gap().round(4)""")
+md(r"""
+The first version's LightGBM had the largest gap, so we searched four regularization settings **on validation folds only**
+(`scripts/tune_lgb.py`). The chosen setting (`reg_B`: smaller learning rate, larger minimum leaf size, stronger L2, more feature
+subsampling) has the best out-of-fold MSE for both the stacked and the metadata-only model *and* a smaller gap.
+""")
+code(r"""report.table_lgb_tuning().round(4)""")
+md(r"""
 **Are the gaps real?** A paired bootstrap over test pairs (500 resamples) gives a 95% interval for the difference in MSE
 between consecutive models on the ladder. With ~500k test pairs even small gains are measurable, so the question becomes
 whether they are *large enough to matter*.
@@ -304,6 +357,24 @@ code(r"""
 from steam.regression_stack import breakdown
 bd = breakdown("test")
 report.fig_breakdown(bd); plt.show()
+""")
+md(r"""
+### Are the predictions trustworthy? Calibration and ranking within a library
+Low MSE alone does not show that predictions are *usable*. We check (1) calibration: within each bin of predicted
+playtime, does the actual playtime match on average? (2) whether the model orders a user's *own* games correctly.
+""")
+code(r"""
+report.fig_calibration(); plt.show()
+report.calibration_stats().round(3)
+""")
+md(r"""
+**Reading this honestly.** The predictions are **unbiased** in every bin and the classifier's probabilities match observed
+rates, so downstream decisions (e.g. "show games with P(play) > 0.8") behave as intended. The model also orders a user's own
+library well (within-user rank correlation around 0.7). But the **spread for a single pair is wide**: an RMSE near 2 on
+the log scale is a typical miss of several-fold in hours. Two reasons, neither fixable by a better learner alone:
+(1) **the zero spike**: for an uncertain game, the MSE-optimal prediction hedges between "never launched" and "played",
+which is exactly why we model P(played) separately (hurdle) and report AUC/BER for it; (2) **taste is noisy**: similar
+users put 2 vs 200 hours into the same game. What the models predict well is *relative engagement*, not exact hours.
 """)
 md(r"""### Cold start: games never seen in training""")
 code(r"""
@@ -448,7 +519,8 @@ md(r"""
 not training randomness; seed error bars exist only for the ranking factor models); the regression is limited to owned pairs;
 there is no temporal split (the crawl is a snapshot, so a sequential model like SASRec would need review timestamps); the
 cold-start FM was not trained with id-dropout; sampled ranking metrics favor popular items (Krichene & Rendle 2020), and we did
-not measure the reranker's catalog coverage; BPR remains weak with uniform negative sampling.
+not measure the reranker's catalog coverage; BPR remains weak with uniform negative sampling; per-pair hour predictions
+remain wide (see calibration), so the models are best used to *rank* and to estimate *probability of play*.
 """)
 
 nb = nbf.v4.new_notebook()

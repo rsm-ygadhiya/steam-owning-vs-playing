@@ -20,6 +20,7 @@ STAGES = [  # (name, module, output that proves it ran)
     ("splits", "steam.splits", "train.parquet"),
     ("regression_cf", "steam.regression_cf", "reg_base_test.parquet"),
     ("ranking", "steam.ranking", "results/ranking.json"),          # before stacking: its ALS / item2vec factors are features
+    ("regression_nn", "steam.regression_nn", "results/regression_nn.json"),   # torch MLP on stacked features
     ("regression_stack", "steam.regression_stack", "results/regression.json"),
     ("classify", "steam.classify", "results/classification.json"),
     ("ranking_ltr", "steam.ranking_ltr", "results/ranking_ltr.json"),
