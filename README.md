@@ -11,14 +11,29 @@ and recommending games they'll play (ranking). Full plan in `PLAN.md`; the spec 
 
 ```bash
 uv sync                                   # Python env (pyproject.toml / uv.lock)
-uv run python scripts/run_all.py          # run any pipeline stage whose outputs are missing (~25 min from scratch)
-uv run python scripts/build_notebook.py   # build + execute notebooks/workbook.ipynb, export workbook.html
+uv run python scripts/run_all.py          # run any pipeline stage whose outputs are missing (~90 min from scratch on a laptop)
+uv run python scripts/build_notebook.py   # build + execute notebooks/workbook.ipynb, export workbook.html (~10 min)
+uv run python scripts/tune_lgb.py         # optional: rerun the LightGBM regularization search (valid folds only)
 ```
 
 Raw data goes in `data/` (4 `.json.gz` files from the [McAuley lab page](https://cseweb.ucsd.edu/~jmcauley/datasets.html#steam_data)).
 `artifacts/` and `figures/` are generated, so don't edit them by hand.
 
 Rerun one stage after changing it: `uv run python scripts/run_all.py ranking` (stage names below).
+
+## Final results (test set; tuned on valid only)
+
+| Task | Best baseline | Course model | **Our best** |
+|---|---|---|---|
+| Hours played (MSE on log(1+min), ↓) | 5.40 item mean | 4.77 bias · 4.15 MF | **3.853 ensemble** (R² 0.58; −58% vs global mean) |
+| Hours, never-seen games (MSE ↓) | 9.08 user mean | 9.95 bias | **7.44** metadata-only model (routed) |
+| Played? (AUC ↑) | 0.823 item rate | 0.802 logistic | **0.903** LightGBM |
+| Playing now? (AUC ↑) | 0.847 item rate | 0.815 logistic | **0.900** LightGBM |
+| Recommend, standard (NDCG@10 ↑) | 0.699 Jaccard | 0.711 ALS | **0.782** LambdaRank reranker |
+| Which owned game gets played (AUC ↑) | 0.697 popularity | 0.758 item2vec | **0.868** Task 4 classifier |
+
+No overfitting: test ≈ valid for every model (ensemble 3.853 vs 3.848); train-vs-OOF gaps reported in the notebook;
+every claimed gain has a bootstrap CI / p-value. Results are predictive associations, not causal effects (Section 4.8).
 
 ## Layout: one module per plan task
 
@@ -35,7 +50,8 @@ Rerun one stage after changing it: `uv run python scripts/run_all.py ranking` (s
 | `ranking_ltr` | `steam/ranking_ltr.py` | 5 | **LightGBM LambdaRank** reranker over all recommenders; Task 4 classifier on the hard protocol; paired bootstrap | `results/ranking_ltr.json` |
 | – | `steam/metrics.py` | 6 | every metric (MSE, AUC/BER, HR/NDCG, coverage/novelty) | – |
 | – | `steam/eda.py` | 2 | EDA numbers + figures F3–F9 | `figures/` |
-| – | `steam/report.py` | 6/9 | tables + figures F1–F2, F10–F25 | `figures/` |
+| – | `steam/report.py` | 6/9 | tables + figures F1–F2, F10–F26 (F26 = calibration); fit-gap, tuning, bootstrap, AUC/p-value, correlation and OLS tables | `figures/` |
+| – | `scripts/tune_lgb.py` | 3 | LightGBM regularization search on valid OOF (chosen setting is in `regression_stack.LGB_REG`) | `results/lgb_tuning.json` |
 | – | `steam/viz.py` | 9 | shared style; model colors (grey baseline / blue course / orange advanced) | – |
 | – | `scripts/build_notebook.py` | 8 | **notebook narrative lives here**; builds + exports `workbook.html` | `workbook.html` |
 
@@ -74,4 +90,4 @@ Rerun one stage after changing it: `uv run python scripts/run_all.py ranking` (s
 - FM id-dropout for cold start; multi-seed error bars for the regression models
 - Reranker catalog coverage (beyond-accuracy) and a hard-protocol-specific reranker
 - Review sentiment task; user clustering; SASRec on review timestamps; bundle scoring
-- Slides + ~20 min video (storyboard in `PLAN.md`)
+- Slides + ~20 min video: record with our own voices (the rubric gives 1/5 to a presentation that "seems automatically generated")

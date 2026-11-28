@@ -1,5 +1,7 @@
 # Assignment 2 Plan — Steam: Predicting What Gamers Play
 
+> **Status (2026-11-27):** all modeling tasks below are implemented (V3). Final numbers and what changed per version are in `README.md`; the narrative is in `scripts/build_notebook.py` → `workbook.html`. Remaining: slides + video.
+
 **Due:** ~Tue Dec 1 (week 10; confirm on Gradescope)
 **Deliverables:** `workbook.html` (notebook exported as HTML) + `video_url.txt` (~20 min mp4 on Drive, "anyone with the link") · peer grading `responses.txt` the week after
 **Rubric:** 5 sections × 5 marks. A 5 means "above and beyond": thorough, an interesting or new approach. This plan aims for 5s.
