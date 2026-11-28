@@ -280,8 +280,11 @@ def run(log=print, quick=False):
     enc = FMEncoder(nu, ni, np.unique(tr.i.values))
     tuning["fm"] = []
     best = (np.inf, None, None, None)
-    for k, lam in ([(16, 1e-4)] if quick else [(16, 1e-4), (32, 1e-4), (32, 1e-5)]):
-        m, fwd, hist = fit_fm(tr, va, enc, k, lam, epochs=3 if quick else 10)
+    # Same scale problem as MF: lam=1e-4 is negligible next to an MSE of ~4. The FM penalty sums
+    # over ~20 active feature vectors per row (vs 2 for MF), so its useful lam range is ~10x smaller.
+    fm_grid = [(16, 0.01)] if quick else [(32, 1e-4), (32, 0.01), (64, 0.03), (64, 0.1), (64, 0.2), (128, 0.1)]
+    for k, lam in fm_grid:
+        m, fwd, hist = fit_fm(tr, va, enc, k, lam, epochs=3 if quick else 12)
         v = min(h["valid_mse"] for h in hist)
         tuning["fm"].append({"K": k, "lambda": lam, "valid_mse": v})
         log(f"[3.3] FM K={k} lambda={lam:g}: valid MSE {v:.4f} ({time.time() - t0:.0f}s)")

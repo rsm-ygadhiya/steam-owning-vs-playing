@@ -23,7 +23,12 @@ RES = ART / "results"
 
 def load(name):
     with open(RES / f"{name}.json") as f:
-        return json.load(f)
+        d = json.load(f)
+    if name == "ranking" and (RES / "ranking_ltr.json").exists():   # merge the LightGBM ranking stage
+        with open(RES / "ranking_ltr.json") as f:
+            for proto, rows in json.load(f)["results"].items():
+                d["results"][proto].update(rows)
+    return d
 
 
 # ------------------------------------------------------------------ tables
@@ -41,6 +46,39 @@ def table_classification(target="played"):
 
 def table_ranking(proto="test"):
     return pd.DataFrame(load("ranking")["results"][proto]).T
+
+
+def bootstrap_regression(pairs=(("Ensemble", "LightGBM (stacked)"), ("Hurdle (LightGBM)", "LightGBM (stacked)"),
+                                ("LightGBM (stacked)", "Latent factor (MF)"), ("Latent factor (MF)", "Bias model"),
+                                ("Bias model", "Item mean")), n_boot=500):
+    """Paired bootstrap over test pairs: 95% CI of MSE(A) - MSE(B). Negative = A is better."""
+    te = splits.load("test")
+    P = pd.read_parquet(ART / "reg_preds_test.parquet")
+    rng = np.random.default_rng(SEED)
+    idx = [rng.integers(0, len(te), len(te)) for _ in range(n_boot)]
+    rows = []
+    for a, b in pairs:
+        d = (P[a].values - te.y.values) ** 2 - (P[b].values - te.y.values) ** 2
+        means = np.array([d[i].mean() for i in idx])
+        lo, hi = np.quantile(means, [0.025, 0.975])
+        rows.append({"A": a, "B": b, "ΔMSE (A − B)": d.mean(), "95% CI low": lo, "95% CI high": hi,
+                     "significant": "yes" if hi < 0 or lo > 0 else "no"})
+    return pd.DataFrame(rows)
+
+
+def table_ltr_significance():
+    """Paired bootstrap over test users: LTR reranker NDCG@10 minus each base model."""
+    with open(RES / "ranking_ltr.json") as f:
+        p = json.load(f)["paired_ndcg10_test"]
+    df = pd.DataFrame(p).T.rename(columns={"diff": "ΔNDCG@10 (LTR − model)", "lo": "95% CI low", "hi": "95% CI high"})
+    df["significant"] = np.where((df["95% CI low"] > 0) | (df["95% CI high"] < 0), "yes", "no")
+    return df
+
+
+def ltr_importance(k=12):
+    with open(RES / "ranking_ltr.json") as f:
+        imp = pd.Series(json.load(f)["importance"])
+    return (imp / imp.sum()).sort_values(ascending=False).head(k).rename("share of gain").to_frame()
 
 
 def style_table(df, best_low=(), best_high=(), fmt="{:.4f}"):
@@ -134,7 +172,7 @@ def fig_training_curves():
         ax.set_title(name)
         ax.legend()
     axes[0].set_ylabel("MSE")
-    fig.suptitle("Stronger L2 (λ=0.15) keeps MF stable: valid MSE no longer blows up after the best epoch",
+    fig.suptitle("Correctly scaled L2 keeps MF and FM stable: valid MSE no longer blows up after the best epoch",
                  x=0.01, ha="left", fontsize=12.5, fontweight="bold")
     fig.tight_layout()
     save(fig, "F12_training_curves")
@@ -217,7 +255,7 @@ def fig_tuning_heatmap():
         ax.text(b, a, f"{v:.3f}", ha="center", va="center", fontsize=9,
                 color="white" if v < H.values.mean() else INK)
     fig.colorbar(im, ax=ax, label="valid MSE", shrink=0.85)
-    ax.set_title("Tuned on validation only: larger K keeps helping")
+    ax.set_title("Tuned on validation: the L2 scale matters more than K")
     save(fig, "F17_tuning")
     return fig
 
@@ -304,11 +342,15 @@ def ablations() -> pd.DataFrame:
         ("Ranking (hard)", "ALS playtime-weighted", "–", rk["hard"]["ALS (playtime-weighted)"]["AUC"], "AUC"),
         ("Ranking (hard)", "− playtime weighting (binary ALS)", "playtime",
          rk["hard"]["ALS (binary)"]["AUC"], "AUC"),
+        ("Ranking (hard)", "+ Task 4 played-classifier instead", "classifier",
+         rk["hard"]["Played classifier (Task 4 LightGBM)"]["AUC"], "AUC"),
         ("Ranking (standard)", "ALS playtime-weighted", "–", rk["test"]["ALS (playtime-weighted)"]["NDCG@10"], "NDCG@10"),
         ("Ranking (standard)", "− playtime weighting (binary ALS)", "playtime",
          rk["test"]["ALS (binary)"]["NDCG@10"], "NDCG@10"),
         ("Ranking (standard)", "+ content features (hybrid)", "content",
          rk["test"]["Hybrid (ALS + content)"]["NDCG@10"], "NDCG@10"),
+        ("Ranking (standard)", "+ every model combined (LTR reranker)", "LTR",
+         rk["test"]["LTR reranker (LightGBM)"]["NDCG@10"], "NDCG@10"),
     ]
     df = pd.DataFrame(rows, columns=["task", "variant", "component", "value", "metric"])
     df["Δ vs full"] = df.groupby("task").value.transform(lambda v: v - v.iloc[0])
@@ -334,12 +376,12 @@ def fig_ablation():
     lab = [f"{t.split('(')[1][:-1]}: {v}" for t, v in zip(d.task, d.variant)]
     ax.barh(lab[::-1], d["Δ vs full"][::-1], color=[BLUE if x < 0 else AQUA for x in d["Δ vs full"][::-1]], height=0.6)
     for y, v in enumerate(d["Δ vs full"][::-1]):
-        ax.text(v, y, f"  {v:+.4f}  " , va="center", ha="left" if v >= 0 else "right", fontsize=9, color=INK2)
+        ax.text(max(v, 0), y, f"  {v:+.4f}", va="center", ha="left", fontsize=9, color=INK2)   # negatives labelled right of 0
     lo, hi = d["Δ vs full"].min(), d["Δ vs full"].max()
     ax.set_xlim(lo * 1.45 if lo < 0 else 0, hi * 1.6 if hi > 0 else 0.005)
     ax.axvline(0, color=INK2, lw=1)
     ax.set_xlabel("Change in metric vs playtime-weighted ALS")
-    ax.set_title("Ranking: playtime weighting helps only on the hard protocol", fontsize=11)
+    ax.set_title("Ranking: playtime weighting helps only on the hard protocol;\ncombining models and the Task 4 classifier help most", fontsize=11)
     ax.grid(axis="y", visible=False)
     save(fig, "F21_ablation")
     return fig
@@ -450,9 +492,11 @@ def table_related_work():
         ["Hu, Koren & Volinsky 2008", "TV viewing", "Implicit feedback", "Confidence-weighted ALS", "Expected rank",
          "Playtime as confidence helps on our hard protocol (owned-but-unplayed negatives) but not on the standard one"],
         ["Rendle 2009 (BPR)", "Rossmann, Netflix", "Implicit ranking", "Pairwise BPR loss", "AUC",
-         "BPR beats popularity on AUC in their paper; here (V1 tuning) BPR trails popularity, ALS and item2vec"],
+         "BPR beats popularity on AUC in their paper; here, even after tuning, BPR trails popularity, ALS and item2vec"],
         ["Rendle 2010 (FM)", "Various", "Sparse regression", "Factorization machines", "RMSE",
          "FM adds metadata; helps cold start more than warm accuracy"],
         ["Barkan & Koenigstein 2016 (item2vec)", "Microsoft Store, music", "Item similarity",
-         "Skip-gram on item sets", "Similarity quality", "Our item2vec orders libraries by playtime, as in HW4"],
+         "Skip-gram on item sets", "Similarity quality", "Our item2vec orders libraries by playtime, as in HW4; best single recommender on the hard protocol"],
+        ["Burges 2010 (LambdaMART)", "Web search (LETOR)", "Learning to rank", "Gradient-boosted trees with lambda gradients",
+         "NDCG", "Our LambdaRank reranker over all base recommenders is the best model on the standard protocol"],
     ], columns=["Work", "Data", "Task", "Method", "Metric", "How we compare"])

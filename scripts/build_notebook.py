@@ -212,8 +212,18 @@ early access, the user's library-size bucket) with a weight and a latent vector,
 in O(kn) with the identity `½[(Σ v x)² − Σ (v x)²]`. With only user and game ids it reduces exactly to the latent
 factor model, so it is a strict generalization. For never-seen games the id feature is masked and the prediction
 comes from metadata alone.
+
+The FM had the same regularization-scale problem as MF (λ = 1e-4 was negligible). Its penalty sums over the ~20 active
+feature vectors of each row, not two. Our first widened grid still put the best λ at its edge, and the FM training
+curve kept overfitting after epoch 4, so we extended the search to λ ∈ {1e-4, 0.01, 0.03, 0.1, 0.2} and K ∈ {32, 64, 128}.
 """)
 code(r"""show_code("steam/regression_cf.py", "FM")""")
+code(r"""
+t = pd.DataFrame(report.load("regression_cf")["fm"]).sort_values("valid_mse")
+display(Markdown(f"**FM validation grid** (best: K={t.iloc[0].K:.0f}, λ={t.iloc[0]['lambda']:g}, valid MSE {t.iloc[0].valid_mse:.4f}; "
+                 f"weakest-λ setting from our first version: {t[t['lambda'] == 1e-4].valid_mse.min():.4f})"))
+t.round(4)
+""")
 md(r"""
 ### 3.4 Stacked LightGBM and 3.5 the hurdle model
 Gradient boosting combines **leak-free engineered features** (user/game play rates and mean log-hours from `train`,
@@ -234,8 +244,18 @@ md(r"""
 - **item2vec**: skip-gram over each user's games sorted by playtime (as in HW4); user = playtime-weighted mean vector.
 - **Content**: tf-idf over tags, genres, specs and developer; the user profile is a playtime-weighted mean.
 - **Cold start**: a ridge map from content to ALS item factors, learned on warm games and applied to unseen ones.
+- **Hybrid**: ALS + content, blended on **per-user z-scores** (rank-normalizing, as in our first version, threw away score gaps
+  and made the hybrid *worse* than ALS); the content weight is tuned on `valid`.
+- **Learning-to-rank reranker (LightGBM LambdaRank; Burges 2010)**: each candidate gets every base model's score, its per-user
+  z-score, and game metadata, and LambdaRank learns how to combine them by directly optimizing NDCG. It is trained on the
+  `valid` protocol and evaluated on `test`/`hard`, which hold different held-out games; the base models only saw `train`.
+- **Task 4 → Task 5:** the hard protocol (played vs owned-but-unplayed) *is* the "will they play it?" question asked per user,
+  so we also rank it with the LightGBM played-classifier from Section 3.5.
+
+Hyperparameters tuned on `valid`: ALS confidence α, factors and L2; BPR factors, learning rate, L2 and epochs; hybrid weight.
 """)
-code(r"""show_code("steam/ranking.py", "fit_als", "fit_item2vec", "mapped_factor_scorer")""")
+code(r"""show_code("steam/ranking.py", "fit_als", "fit_item2vec", "mapped_factor_scorer", "zscore_rows")""")
+code(r"""show_code("steam/ranking_ltr.py", "candidate_features", "run")""")
 md(r"""### What the models learn""")
 code(r"""report.fig_training_curves(); plt.show()""")
 code(r"""report.fig_tsne(); plt.show()""")
@@ -252,6 +272,7 @@ md(r"""
 | ALS (implicit) | fast, uses playtime as confidence | squared loss on 0/1 targets; popularity-leaning | ~10 s per config |
 | BPR | optimizes ranking directly | slow to converge; sensitive to learning rate | ~1 min |
 | Content / mapped factors | only option for unseen games | weaker on warm games | seconds |
+| LambdaRank reranker | combines complementary signals; optimizes NDCG directly | needs every base model at serving time; needs its own held-out data | ~2 min |
 """)
 
 # =============================================================================
@@ -272,6 +293,12 @@ display(Markdown(f"**Best: {b}**, test MSE **{reg.loc[b,'MSE']:.3f}** vs **{reg.
                  f"{reg.loc['Bias model','MSE']:.3f} for the course bias model."))
 """)
 code(r"""report.fig_mse_bars("test"); plt.show()""")
+md(r"""
+**Are the gaps real?** A paired bootstrap over test pairs (500 resamples) gives a 95% interval for the difference in MSE
+between consecutive models on the ladder. With ~500k test pairs even small gains are measurable, so the question becomes
+whether they are *large enough to matter*.
+""")
+code(r"""report.bootstrap_regression().round(4)""")
 code(r"""report.fig_tuning_heatmap(); plt.show()""")
 code(r"""
 from steam.regression_stack import breakdown
@@ -285,8 +312,15 @@ display(report.style_table(cold, best_low=["MSE", "MAE"]))
 """)
 md(r"""
 Collaborative models collapse on unseen games: the stacked models were trained where game statistics always exist.
-The **metadata-only LightGBM** is the only regression model that clearly beats the user-mean baseline here. This is why
-the plan includes a content-aware path for cold start (also in ranking, below).
+The **metadata-only LightGBM** is the only regression model that clearly beats the user-mean baseline here. Whether a game
+is in the training data is known at prediction time, so the deployable system **routes never-seen games to the
+metadata-only model** and everything else to the ensemble:
+""")
+code(r"""
+c = report.table_regression("cold"); t = report.table_regression("test")
+display(Markdown(f"Routed system: test MSE **{t.loc['Ensemble','MSE']:.3f}** (warm games, ensemble) and cold MSE "
+                 f"**{c.loc['LightGBM (metadata only)','MSE']:.3f}** (vs {c.loc['Ensemble','MSE']:.3f} if the ensemble were used on cold games, "
+                 f"and {c.loc['User mean','MSE']:.3f} for the user-mean baseline)."))
 """)
 md(r"""## 4.2 Will they play it? (classification)""")
 code(r"""
@@ -303,10 +337,30 @@ for p, title in [("test", "Standard protocol (1 played vs 99 not-owned)"),
     display(Markdown(f"**{title}**"))
     display(report.style_table(report.table_ranking(p), best_high=["AUC", "HR@1", "HR@3", "HR@10", "NDCG@1", "NDCG@3", "NDCG@10"]))
 """)
+md(r"""
+**Reading the ranking tables.**
+- *Standard protocol:* popularity and Jaccard are hard to beat because the held-out game is usually a hit. Tuned ALS is the
+  best single model on NDCG; the **LambdaRank reranker** beats every single model by learning *when* to trust kNN, ALS
+  or popularity (its most-used inputs are the per-user z-scores of Jaccard, ALS and popularity).
+- *Hard protocol:* every recommender drops sharply, because popularity can no longer separate the candidates (they are all owned).
+  The **Task 4 played-classifier** is by far the best ranker here: it was trained on exactly this question and uses
+  the user's own play rate, genre affinity and the CF scores.
+- *Cold start:* only content-aware models work; mapping content to ALS factors and blending with tf-idf similarity is best.
+- *BPR* trails ALS even after tuning learning rate, L2 and epochs (`implicit`'s BPR samples negatives uniformly, which
+  mostly teaches it popularity); with sampled metrics it is the weakest collaborative model.
+""")
 code(r"""report.fig_ranking(); plt.show()""")
 code(r"""
 R = report.load("ranking")
 pd.DataFrame({m: {k: f"{np.mean(v):.4f} ± {np.std(v):.4f}" for k, v in d.items()} for m, d in R["seeds"].items()}).T
+""")
+md(r"""
+**Is the reranker's gain significant, and what does it use?** Paired bootstrap over test users (1,000 resamples) of the
+per-user NDCG@10 difference, and the reranker's feature importance (share of total split gain).
+""")
+code(r"""
+display(report.table_ltr_significance().round(4))
+display(report.ltr_importance().round(3))
 """)
 md(r"""## 4.4 Ablations: what each component is worth""")
 code(r"""
@@ -355,8 +409,11 @@ Our framing makes the gap between owning and playing the object of study.
 - Hu et al. (2008) argue that **interaction strength should set confidence**. In our data, playtime-weighted ALS beats binary ALS
   on the *hard* protocol (choosing among owned games), but not on the standard protocol. Playtime helps decide which owned game
   gets played; it does not help predict which unowned game gets picked up.
-- Ordering a library by playtime (item2vec, as in HW4) gives the best hard-protocol ranker: embeddings that encode what a user
-  plays *most* transfer to what they will play at all.
+- Ordering a library by playtime (item2vec, as in HW4) gives the best *single-signal recommender* on the hard protocol:
+  embeddings that encode what a user plays *most* transfer to what they will play at all. But a supervised model trained
+  on the actual question (our Task 4 classifier) beats every recommender there by a wide margin.
+- As in the learning-to-rank literature (Burges 2010) and in Netflix Prize blends, **combining complementary rankers**
+  beats any single one: the LambdaRank reranker improves NDCG@10 over the best single model by a statistically clear margin.
 - Unlike SASRec's results, where most-popular is a weak baseline, **popularity is very strong** on the standard sampled
   protocol here. Libraries overlap heavily, and sampled metrics are known to favor popular items (Krichene & Rendle 2020).
   Our **hard protocol** removes this advantage and shows where personalization really matters.
@@ -370,20 +427,28 @@ code(r"""
 reg = report.table_regression("test"); rk = report.load("ranking")["results"]
 best = reg.MSE.idxmin()
 hb = max(rk["hard"], key=lambda m: rk["hard"][m]["AUC"])
+ts = max(rk["test"], key=lambda m: rk["test"][m]["NDCG@10"])
+single = max([m for m in rk["test"] if "LTR" not in m], key=lambda m: rk["test"][m]["NDCG@10"])
 display(Markdown(f'''
 1. **Owning ≠ playing.** {eda.glance().set_index("Statistic").loc["Owned games never played","Value"]} of owned games are never played,
    and engagement depends on price, genre and the user's own history.
-2. **Playtime is predictable.** {best} reaches test MSE {reg.loc[best,"MSE"]:.3f} vs {reg.loc["Global mean","MSE"]:.3f} for the global mean;
-   collaborative signal is by far the most valuable component; the hurdle split adds only a small further gain in V1.
+2. **Playtime is predictable.** {best} reaches test MSE {reg.loc[best,"MSE"]:.3f} vs {reg.loc["Global mean","MSE"]:.3f} for the global mean
+   ({1 - reg.loc[best,"MSE"] / reg.loc["Bias model","MSE"]:.0%} below the course bias model). Collaborative signal is by far
+   the most valuable component; implicit-feedback affinities (ALS, item2vec) add to the explicit MF; the hurdle split adds a small further gain.
 3. **Recommend for play, not purchase.** Popularity looks excellent on the standard protocol (AUC {rk["test"]["Most popular"]["AUC"]:.3f})
    but drops to {rk["hard"]["Most popular"]["AUC"]:.3f} when asked which *owned* games get played; {hb} reaches {rk["hard"][hb]["AUC"]:.3f}.
+4. **Combine, then specialize.** {ts} reaches standard NDCG@10 {rk["test"][ts]["NDCG@10"]:.3f} vs {rk["test"][single]["NDCG@10"]:.3f}
+   for the best single model ({single}); for owned games, the Task 4 classifier is the right tool.
+5. **Regularization scale matters.** Our first MF/FM grids used λ values ~1/4000 of the loss; fixing the scale removed MF's
+   overfitting and was the largest single gain for the main task.
 '''))
 """)
 md(r"""
-**Limitations / next steps (V2):** a single split seed for the regression models (error bars only for the ranking factor
-models); the regression is limited to owned pairs; there is no temporal split (the crawl is a snapshot, so a sequential
-model would need review timestamps); the cold-start FM was not trained with id-dropout; the sampled ranking metrics favor popular items;
-BPR and the hybrid weight are under-tuned.
+**Limitations / next steps:** a single split seed for the regression models (bootstrap intervals cover test-set noise but
+not training randomness; seed error bars exist only for the ranking factor models); the regression is limited to owned pairs;
+there is no temporal split (the crawl is a snapshot, so a sequential model like SASRec would need review timestamps); the
+cold-start FM was not trained with id-dropout; sampled ranking metrics favor popular items (Krichene & Rendle 2020), and we did
+not measure the reranker's catalog coverage; BPR remains weak with uniform negative sampling.
 """)
 
 nb = nbf.v4.new_notebook()
@@ -395,7 +460,7 @@ print(f"wrote {NB} ({len(cells)} cells)")
 
 if "--no-exec" not in sys.argv:
     subprocess.run([sys.executable, "-m", "jupyter", "nbconvert", "--to", "notebook", "--execute", "--inplace",
-                    "--ExecutePreprocessor.timeout=1800", str(NB)], check=True, cwd=ROOT)
+                    "--ExecutePreprocessor.timeout=1800", "--ExecutePreprocessor.startup_timeout=300", str(NB)], check=True, cwd=ROOT)
     subprocess.run([sys.executable, "-m", "jupyter", "nbconvert", "--to", "html", "--output", "workbook",
                     "--output-dir", str(ROOT), str(NB)], check=True, cwd=ROOT)
     html = (ROOT / "workbook.html").read_text()

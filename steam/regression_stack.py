@@ -53,6 +53,14 @@ def stack_features(name: str, d: pd.DataFrame, base: pd.DataFrame) -> pd.DataFra
     X["mf_pred"] = base["Latent factor (MF)"].values
     X["mf_dot"] = base["_mf_dot"].values
     X["fm_pred"] = base["Factorization machine"].values
+    # implicit-feedback affinities from the ranking stage (both fit on TRAIN played pairs only)
+    cold = np.isin(d.i.values, np.load(ART / "cold_items.npy"))
+    for col, (uf, vf) in {"als_dot": ("als_user_factors", "als_item_factors"),
+                          "i2v_sim": ("item2vec_user", "item2vec_vectors")}.items():
+        U, V = np.load(ART / f"{uf}.npy"), np.load(ART / f"{vf}.npy")
+        v = np.einsum("nk,nk->n", U[d.u.values], V[d.i.values]).astype(np.float64)
+        v[cold] = np.nan                    # never-seen games have no trained factors
+        X[col] = v
     return X
 
 

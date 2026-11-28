@@ -35,6 +35,9 @@ from . import features, metrics, splits
 RES = ART / "results"
 RES.mkdir(exist_ok=True)
 
+ALS_REGS = [0.05, 1.0, 5.0]
+BPR_GRID = [(64, 0.01, 0.01, 100), (64, 0.005, 0.01, 200), (128, 0.01, 0.001, 200), (128, 0.005, 0.01, 200)]
+
 
 # ----------------------------------------------------------------- data
 def train_matrices():
@@ -150,8 +153,29 @@ def rank_normalize(S):
     return S.argsort(1).argsort(1) / max(S.shape[1] - 1, 1)
 
 
-def hybrid_scorer(s1, s2, w):
-    return lambda users, cands: (1 - w) * rank_normalize(s1(users, cands)) + w * rank_normalize(s2(users, cands))
+def zscore_rows(S):
+    """Per-user standardization: keeps score gaps (rank-normalizing throws them away)."""
+    S = np.asarray(S, np.float64)
+    return (S - S.mean(1, keepdims=True)) / (S.std(1, keepdims=True) + 1e-9)
+
+
+def hybrid_scorer(s1, s2, w, norm=zscore_rows):
+    return lambda users, cands: (1 - w) * norm(s1(users, cands)) + w * norm(s2(users, cands))
+
+
+# Candidate scores that the learning-to-rank stage (ranking_ltr.py, LightGBM) combines.
+LTR_MODELS = ["Most popular", "Jaccard item-kNN", "ALS (binary)", "ALS (playtime-weighted)",
+              "BPR-MF", "item2vec", "Content (tf-idf)"]
+
+
+def dump_candidates(scorers, R, path, bs=5000):
+    """Save every base model's score for every candidate: (n_users, n_cands, n_models)."""
+    users, cands = R["users"], np.concatenate([R["pos"][:, None], R["negs"]], 1)
+    F = np.zeros(cands.shape + (len(LTR_MODELS),), np.float32)
+    for k, n in enumerate(LTR_MODELS):
+        for s in range(0, len(users), bs):
+            F[s:s + bs, :, k] = scorers[n](users[s:s + bs], cands[s:s + bs])
+    np.savez(path, users=users, cands=cands, F=F, names=np.array(LTR_MODELS))
 
 
 # ----------------------------------------------------------- evaluation
@@ -205,32 +229,35 @@ def run(log=print, quick=False):
     tuning["als"] = []
     best = {}
     for kind, M in [("binary", R), ("playtime", W)]:
-        for alpha in ([10] if quick else [5, 20, 60]):
-            for f in ([32] if quick else [64, 128]):
-                U, V = fit_als(M, factors=f, alpha=alpha)
-                v = evaluate(factor_scorer(U, V), P["valid"])
-                tuning["als"].append({"confidence": kind, "alpha": alpha, "factors": f, **v})
-                log(f"[5.2] ALS {kind} alpha={alpha} f={f}: valid HR@10={v['HR@10']:.4f} ({time.time() - t0:.0f}s)")
-                if v["NDCG@10"] > best.get(kind, (-1,))[0]:
-                    best[kind] = (v["NDCG@10"], alpha, f, U, V)
+        # V1 found f=64 >> f=128 at reg=0.05: a sign of under-regularization, so reg is tuned too.
+        grid = [(10, 32, 0.05)] if quick else [(a, f, r) for a in [20, 60] for f in [64, 128] for r in ALS_REGS]
+        for alpha, f, reg in grid:
+            U, V = fit_als(M, factors=f, reg=reg, alpha=alpha)
+            v = evaluate(factor_scorer(U, V), P["valid"])
+            tuning["als"].append({"confidence": kind, "alpha": alpha, "factors": f, "reg": reg, **v})
+            log(f"[5.2] ALS {kind} alpha={alpha} f={f} reg={reg}: valid NDCG@10={v['NDCG@10']:.4f} ({time.time() - t0:.0f}s)")
+            if v["NDCG@10"] > best.get(kind, (-1,))[0]:
+                best[kind] = (v["NDCG@10"], alpha, f, reg, U, V)
     for kind, label in [("binary", "ALS (binary)"), ("playtime", "ALS (playtime-weighted)")]:
-        _, alpha, f, U, V = best[kind]
+        _, alpha, f, reg, U, V = best[kind]
         scorers[label] = factor_scorer(U, V)
         ev(label, scorers[label])
-    als_U, als_V = best["playtime"][3], best["playtime"][4]
+    als_U, als_V = best["playtime"][4], best["playtime"][5]
     np.save(ART / "als_item_factors.npy", als_V)
+    np.save(ART / "als_user_factors.npy", als_U)       # reused as stacking features (regression_stack)
 
     # ---- 5.1 BPR
     tuning["bpr"] = []
     bestb = (-1,)
-    for f, lr in ([(32, 0.05)] if quick else [(64, 0.05), (128, 0.05), (64, 0.01)]):
-        U, V = fit_bpr(R, factors=f, lr=lr)
+    # V1: lr 0.01 beat 0.05 -> explore smaller steps, more epochs and the L2 strength.
+    for f, lr, reg, it in ([(32, 0.05, 0.01, 30)] if quick else BPR_GRID):
+        U, V = fit_bpr(R, factors=f, lr=lr, reg=reg, iters=it)
         v = evaluate(factor_scorer(U, V), P["valid"])
-        tuning["bpr"].append({"factors": f, "lr": lr, **v})
-        log(f"[5.1] BPR f={f} lr={lr}: valid HR@10={v['HR@10']:.4f} ({time.time() - t0:.0f}s)")
+        tuning["bpr"].append({"factors": f, "lr": lr, "reg": reg, "iters": it, **v})
+        log(f"[5.1] BPR f={f} lr={lr} reg={reg} iters={it}: valid NDCG@10={v['NDCG@10']:.4f} ({time.time() - t0:.0f}s)")
         if v["NDCG@10"] > bestb[0]:
-            bestb = (v["NDCG@10"], f, lr, U, V)
-    scorers["BPR-MF"] = factor_scorer(bestb[3], bestb[4])
+            bestb = (v["NDCG@10"], f, lr, reg, it, U, V)
+    scorers["BPR-MF"] = factor_scorer(bestb[5], bestb[6])
     ev("BPR-MF", scorers["BPR-MF"])
 
     # ---- 5.3 item2vec
@@ -238,6 +265,7 @@ def run(log=print, quick=False):
     scorers["item2vec"] = factor_scorer(U, V)
     ev("item2vec", scorers["item2vec"])
     np.save(ART / "item2vec_vectors.npy", V)
+    np.save(ART / "item2vec_user.npy", U)
 
     # ---- 5.4 content, hybrid, cold-start mapping
     X = content_matrix()
@@ -245,9 +273,10 @@ def run(log=print, quick=False):
     ev("Content (tf-idf)", scorers["Content (tf-idf)"])
     tuning["hybrid"] = []
     bh = (-1, 0)
-    for w in [0.1, 0.2, 0.3, 0.5]:
+    for w in [0.0, 0.05, 0.1, 0.2, 0.3, 0.5]:
         v = evaluate(hybrid_scorer(scorers["ALS (playtime-weighted)"], scorers["Content (tf-idf)"], w), P["valid"])
         tuning["hybrid"].append({"w_content": w, **v})
+        log(f"[5.4] hybrid w_content={w}: valid NDCG@10={v['NDCG@10']:.4f}")
         if v["NDCG@10"] > bh[0]:
             bh = (v["NDCG@10"], w)
     scorers["Hybrid (ALS + content)"] = hybrid_scorer(scorers["ALS (playtime-weighted)"], scorers["Content (tf-idf)"], bh[1])
@@ -270,11 +299,16 @@ def run(log=print, quick=False):
         results["cold"][n] = evaluate(s, P["cold"])
         log(f"[5.4] cold {n}: AUC={results['cold'][n]['AUC']:.4f} HR@10={results['cold'][n]['HR@10']:.4f}")
 
+    # ---- candidate scores for the learning-to-rank stage (valid trains it, test/hard evaluate it)
+    for p in ["valid", "test", "hard"]:
+        dump_candidates(scorers, P[p], ART / f"rank_feats_{p}.npz")
+    log(f"[5] candidate features saved ({time.time() - t0:.0f}s)")
+
     # ---- error bars over seeds for the factor models (test protocol)
     seeds = {}
-    for label, fit in [("ALS (playtime-weighted)", lambda s: fit_als(W, best["playtime"][2], alpha=best["playtime"][1], seed=s)),
-                       ("ALS (binary)", lambda s: fit_als(R, best["binary"][2], alpha=best["binary"][1], seed=s)),
-                       ("BPR-MF", lambda s: fit_bpr(R, bestb[1], lr=bestb[2], seed=s))]:
+    for label, fit in [("ALS (playtime-weighted)", lambda s: fit_als(W, best["playtime"][2], reg=best["playtime"][3], alpha=best["playtime"][1], seed=s)),
+                       ("ALS (binary)", lambda s: fit_als(R, best["binary"][2], reg=best["binary"][3], alpha=best["binary"][1], seed=s)),
+                       ("BPR-MF", lambda s: fit_bpr(R, bestb[1], lr=bestb[2], reg=bestb[3], iters=bestb[4], seed=s))]:
         runs = [evaluate(factor_scorer(*fit(s)), P["test"]) for s in (SEEDS[:1] if quick else SEEDS)]
         seeds[label] = {k: [r[k] for r in runs] for k in runs[0]}
     log(f"[5] seeds done ({time.time() - t0:.0f}s)")
@@ -298,8 +332,10 @@ def run(log=print, quick=False):
 
     with open(RES / "ranking.json", "w") as f:
         json.dump({"results": results, "tuning": tuning, "seeds": seeds, "beyond": beyond,
-                   "best": {"als_playtime": best["playtime"][1:3], "als_binary": best["binary"][1:3],
-                            "bpr": bestb[1:3], "hybrid_w": bh[1]}}, f, indent=1)
+                   "best": {"als_playtime": dict(zip(["alpha", "factors", "reg"], best["playtime"][1:4])),
+                            "als_binary": dict(zip(["alpha", "factors", "reg"], best["binary"][1:4])),
+                            "bpr": dict(zip(["factors", "lr", "reg", "iters"], bestb[1:5])),
+                            "hybrid_w": bh[1]}}, f, indent=1)
     log(f"[5] done in {time.time() - t0:.0f}s")
     return results
 

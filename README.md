@@ -28,9 +28,10 @@ Rerun one stage after changing it: `uv run python scripts/run_all.py ranking` (s
 | `splits` | `steam/splits.py` | 1 | **the one shared split** + ranking protocols + leakage checks | `train/valid/test/cold.parquet`, `rank_*.npz` |
 | – | `steam/features.py` | 1/3 | leak-free features (train-only stats, genre affinity, metadata) | – |
 | `regression_cf` | `steam/regression_cf.py` | 3 | **PyTorch**: means, bias model, MF, factorization machine | `reg_base_*.parquet` |
-| `regression_stack` | `steam/regression_stack.py` | 3 | **LightGBM**: stacked model, metadata-only model, hurdle, ensemble | `results/regression.json` |
+| `ranking` | `steam/ranking.py` | 5 | popularity, Jaccard, BPR, ALS (binary vs playtime), item2vec, content, z-score hybrid, cold start; dumps candidate scores | `results/ranking.json`, `rank_feats_*.npz` |
+| `regression_stack` | `steam/regression_stack.py` | 3 | **LightGBM**: stacked model (+ ALS / item2vec affinities), metadata-only model, hurdle, ensemble | `results/regression.json` |
 | `classify` | `steam/classify.py` | 4 | played / active classifiers (logistic, LightGBM) | `results/classification.json` |
-| `ranking` | `steam/ranking.py` | 5 | popularity, Jaccard, BPR, ALS (binary vs playtime), item2vec, content, cold start | `results/ranking.json` |
+| `ranking_ltr` | `steam/ranking_ltr.py` | 5 | **LightGBM LambdaRank** reranker over all recommenders; Task 4 classifier on the hard protocol; paired bootstrap | `results/ranking_ltr.json` |
 | – | `steam/metrics.py` | 6 | every metric (MSE, AUC/BER, HR/NDCG, coverage/novelty) | – |
 | – | `steam/eda.py` | 2 | EDA numbers + figures F3–F9 | `figures/` |
 | – | `steam/report.py` | 6/9 | tables + figures F1–F2, F10–F25 | `figures/` |
@@ -44,32 +45,20 @@ Rerun one stage after changing it: `uv run python scripts/run_all.py ranking` (s
 4. **Don't import torch and LightGBM in the same process** (macOS OpenMP crash). That's why stages are separate processes.
 5. Edit notebook text in `scripts/build_notebook.py`, not in the `.ipynb`.
 
-## V2 backlog: pick a workstream
+## V2 changes (done)
 
-Each workstream maps to one or two files, so people can work in parallel without conflicts.
+- **MF / FM regularization scale fixed**: λ ≤ 1e-3 was ~1/4000 of the loss. MF valid MSE 4.244 → 4.138; FM grid widened the same way.
+- **Stacking uses implicit-feedback affinities** (ALS dot, item2vec similarity) → ensemble test MSE 4.066 → ~3.92.
+- **Ranking**: ALS L2 tuned; BPR lr/L2/epochs tuned (still weak); hybrid blends per-user z-scores (now beats ALS; was worse).
+- **New LambdaRank reranker** (`ranking_ltr.py`): best on the standard protocol (NDCG@10 ≈ 0.78 vs 0.71 for the best single model),
+  early-stopped on a pessimistic-tie NDCG (LightGBM's built-in NDCG treats ties optimistically and stopped at round 1).
+- **Task 4 classifier ranks the hard protocol**: AUC ≈ 0.86 vs 0.76 for the best recommender.
+- **Significance**: paired bootstrap CIs for the regression ladder and the reranker's gains.
+- Stage order changed: `ranking` now runs before `regression_stack` (its factors are features).
 
-**A. Regression (`regression_cf.py`, `regression_stack.py`)**
-- **MF overfits after epoch 2** (see F12): λ is far too weak and the best grid point is at its edge (largest K and λ) → try λ ∈ {1e-2, 3e-2, 1e-1}, K ∈ {128, 256}, lower lr. Likely the biggest single gain
-- FM: id-dropout during training (mask game id ~30%) so metadata carries signal → better cold start
-- LightGBM: tune num_leaves / learning rate; add embedding features, review-derived features
-- Multi-seed error bars (3 seeds) for every regression model
-- Ensemble: non-negative blend; separate cold-start blend
+## Remaining ideas
 
-**B. Classification + hurdle (`classify.py`)**
-- Calibration plot for P(played); precision@K per user
-- `active` task: recency features, class weighting
-
-**C. Ranking (`ranking.py`)**
-- Tune BPR (lr, epochs) and ALS regularization; more seeds
-- Stretch: SASRec-style sequential model on review timestamps (torch, so run it as its own stage)
-- Bundle scoring (Pathak 2017) as an extension
-- Explanations (F24): item2vec vs ALS similarity
-
-**D. EDA + extra tasks (`eda.py`, new module)**
-- Review sentiment task (tf-idf + logistic, BER), helpfulness
-- User clustering (collectors vs grinders vs casuals) → per-cluster model accuracy
-
-**E. Story, slides, video (`build_notebook.py`, `report.py`)**
-- Tighten narrative + takeaways; check every claim against the final numbers
-- Slides from `figures/`; record ~20 min (storyboard in `PLAN.md`)
-- Related work: verify each "how we compare" line against final results
+- FM id-dropout for cold start; multi-seed error bars for the regression models
+- Reranker catalog coverage (beyond-accuracy) and a hard-protocol-specific reranker
+- Review sentiment task; user clustering; SASRec on review timestamps; bundle scoring
+- Slides + ~20 min video (storyboard in `PLAN.md`)
