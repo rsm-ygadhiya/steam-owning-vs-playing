@@ -11,12 +11,13 @@ and recommending games they'll play (ranking). Full plan in `PLAN.md`; the spec 
 
 ```bash
 uv sync                                   # Python env (pyproject.toml / uv.lock)
+bash scripts/download_data.sh             # the 4 raw files into data/ (~84 MB; not stored in git)
 uv run python scripts/run_all.py          # run any pipeline stage whose outputs are missing (~90 min from scratch on a laptop)
 uv run python scripts/build_notebook.py   # build + execute notebooks/workbook.ipynb, export workbook.html (~10 min)
 uv run python scripts/tune_lgb.py         # optional: rerun the LightGBM regularization search (valid folds only)
 ```
 
-Raw data goes in `data/` (4 `.json.gz` files from the [McAuley lab page](https://cseweb.ucsd.edu/~jmcauley/datasets.html#steam_data)).
+Raw data lives in `data/` (gitignored; 4 `.json.gz` files from the [McAuley lab page](https://cseweb.ucsd.edu/~jmcauley/datasets.html#steam_data)).
 `artifacts/` and `figures/` are generated, so don't edit them by hand.
 
 Rerun one stage after changing it: `uv run python scripts/run_all.py ranking` (stage names below).
